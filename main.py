@@ -1,22 +1,28 @@
 import streamlit as st
 import pandas as pd
-import boto3
 import io
 import json
 from datetime import datetime
-from botocore.exceptions import ClientError
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 
 st.set_page_config(layout="wide")
-# st.title("🧀 GaneshKirti Milk Parlor")
 st.title("🧀 Inventory Management")
 
-# AWS S3 Configuration
-region_name = "us-east-1"
-bucket_name = "sfdr-rag"
-s3 = boto3.client('s3', region_name=region_name)
+# Google Drive Configuration
+SCOPES = ['https://www.googleapis.com/auth/drive']
+SERVICE_ACCOUNT_FILE = r"ganeshkirtimilkparlor-688df3e7a03f.json"
 
-# Files
+credentials = service_account.Credentials.from_service_account_file(
+    SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+drive_service = build('drive', 'v3', credentials=credentials)
+
+# Folder ID in your Google Drive where files will be stored
+FOLDER_ID = '1TepR4mGbRv-w2PlHGIgyjN4dceVXmrFr'
+
+# File names
 inventory_file = 'inventory.csv'
 sales_file = 'sales.csv'
 orders_file = 'orders.csv'
@@ -26,57 +32,69 @@ products_file = 'products.json'
 units = ["kg", "ltr", "nos"]
 status_options = ["Pending", "Completed", "Cancelled"]
 
-# --- Products Management via S3 ---
-def load_products():
-    try:
-        obj = s3.get_object(Bucket=bucket_name, Key=products_file)
-        return json.loads(obj['Body'].read().decode('utf-8'))
-    except ClientError as e:
-        if e.response['Error']['Code'] == 'NoSuchKey':
-            default_products = {
-                "Dahi": "kg", "Basundi": "ltr", "Lassi": "ltr", "Pedha": "nos",
-                "BadamShek": "ltr", "GulabJamun": "nos", "Paneer": "kg",
-                "Shrikhand": "kg", "Milk": "ltr", "Butter": "kg"
-            }
-            save_products(default_products)
-            return default_products
-        else:
-            raise
+# Helper functions
+def get_file_id(file_name):
+    query = f"name='{file_name}' and '{FOLDER_ID}' in parents and trashed=false"
+    results = drive_service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
+    items = results.get('files', [])
+    return items[0]['id'] if items else None
 
-def save_products(products_dict):
-    s3.put_object(Bucket=bucket_name, Key=products_file, Body=json.dumps(products_dict))
+def upload_file(file_name, data):
+    file_id = get_file_id(file_name)
+    media = MediaIoBaseUpload(io.BytesIO(data), mimetype='application/octet-stream')
+    if file_id:
+        drive_service.files().update(fileId=file_id, media_body=media).execute()
+    else:
+        file_metadata = {'name': file_name, 'parents': [FOLDER_ID]}
+        drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
-products = load_products()
+def download_file(file_name):
+    file_id = get_file_id(file_name)
+    if not file_id:
+        return None
+    request = drive_service.files().get_media(fileId=file_id)
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        status, done = downloader.next_chunk()
+    fh.seek(0)
+    return fh.read()
 
-# --- File Initializers ---
 def ensure_file_exists(file_name, columns):
-    try:
-        s3.head_object(Bucket=bucket_name, Key=file_name)
-    except ClientError as e:
-        if e.response['Error']['Code'] == '404':
-            df = pd.DataFrame(columns=columns)
-            csv_buffer = io.StringIO()
-            df.to_csv(csv_buffer, index=False)
-            s3.put_object(Bucket=bucket_name, Key=file_name, Body=csv_buffer.getvalue())
+    if not get_file_id(file_name):
+        df = pd.DataFrame(columns=columns)
+        csv_buffer = io.StringIO()
+        df.to_csv(csv_buffer, index=False)
+        upload_file(file_name, csv_buffer.getvalue().encode())
 
-ensure_file_exists(inventory_file, ['Date', 'Product', 'Quantity', 'Unit', 'Price', 'Total'])
-ensure_file_exists(sales_file, ['Date', 'Product', 'Quantity', 'Unit', 'Price', 'Total'])
-ensure_file_exists(orders_file, ['Date', 'Product', 'Quantity', 'Unit', 'Price', 'Total', 'Party', 'Advance', 'Status'])
-
-# --- Data Helpers ---
 def load_data(file_name):
-    try:
-        obj = s3.get_object(Bucket=bucket_name, Key=file_name)
-        return pd.read_csv(io.BytesIO(obj['Body'].read()))
-    except Exception:
-        return pd.DataFrame()
+    data = download_file(file_name)
+    if data:
+        return pd.read_csv(io.BytesIO(data))
+    return pd.DataFrame()
 
 def save_data(df, file_name):
     csv_buffer = io.StringIO()
     df.to_csv(csv_buffer, index=False)
-    s3.put_object(Bucket=bucket_name, Key=file_name, Body=csv_buffer.getvalue())
+    upload_file(file_name, csv_buffer.getvalue().encode())
 
-# --- AGGrid Viewer ---
+def load_products():
+    data = download_file(products_file)
+    if data:
+        return json.loads(data.decode('utf-8'))
+    else:
+        default_products = {
+            "Dahi": "kg", "Basundi": "ltr", "Lassi": "ltr", "Pedha": "nos",
+            "BadamShek": "ltr", "GulabJamun": "nos", "Paneer": "kg",
+            "Shrikhand": "kg", "Milk": "ltr", "Butter": "kg"
+        }
+        save_products(default_products)
+        return default_products
+
+def save_products(products_dict):
+    upload_file(products_file, json.dumps(products_dict).encode())
+
 def show_aggrid(df, editable_cols=None, height=400, return_df=False):
     if df.empty:
         st.info("No data available.")
@@ -97,7 +115,6 @@ def show_aggrid(df, editable_cols=None, height=400, return_df=False):
                 gb.configure_column(col, editable=True)
 
     grid_options = gb.build()
-
     grid_response = AgGrid(
         df,
         gridOptions=grid_options,
@@ -111,17 +128,21 @@ def show_aggrid(df, editable_cols=None, height=400, return_df=False):
     )
     return grid_response['data'] if return_df else None
 
-# --- Sidebar Nav ---
+# Ensure files exist
+ensure_file_exists(inventory_file, ['Date', 'Product', 'Quantity', 'Unit', 'Price', 'Total'])
+ensure_file_exists(sales_file, ['Date', 'Product', 'Quantity', 'Unit', 'Price', 'Total'])
+ensure_file_exists(orders_file, ['Date', 'Product', 'Quantity', 'Unit', 'Price', 'Total', 'Party', 'Advance', 'Status'])
+
+# Sidebar Navigation
 if "page" not in st.session_state:
     st.session_state.page = "Reports"
 
 page = st.sidebar.radio("Go to", ["Reports", "Inventory", "Sales", "Orders", "Add Products"])
 st.session_state.page = page
 
-# --- Pages ---
+# Pages
 if page == "Reports":
     st.header("📊 Report")
-
     inventory_df = load_data(inventory_file)
     sales_df = load_data(sales_file)
     orders_df = load_data(orders_file)
@@ -132,8 +153,7 @@ if page == "Reports":
 
     start_date = st.date_input("Start Date", datetime.now().date())
     end_date = st.date_input("End Date", datetime.now().date())
-
-    product_filter = st.selectbox("Filter by Product", ["All Products"] + list(products.keys()))
+    product_filter = st.selectbox("Filter by Product", ["All Products"] + list(load_products().keys()))
 
     def filter_df(df):
         filtered = df[(df["Date"] >= start_date) & (df["Date"] <= end_date)]
@@ -146,14 +166,10 @@ if page == "Reports":
     filtered_orders = filter_df(orders_df)
 
     col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("💰 Inventory Cost ₹", f"{filtered_inventory['Total'].sum():.2f}")
-    with col2:
-        st.metric("📈 Total Sales Cost ₹", f"{filtered_sales['Total'].sum():.2f}")
-    with col3:
-        st.metric("📦 Inventory Added Qty", f"{filtered_inventory['Quantity'].sum():.2f}")
-    with col4:
-        st.metric("🛒 Total Orders Qty", f"{filtered_orders['Quantity'].sum():.2f}")
+    col1.metric("💰 Inventory Cost ₹", f"{filtered_inventory['Total'].sum():.2f}")
+    col2.metric("📈 Total Sales Cost ₹", f"{filtered_sales['Total'].sum():.2f}")
+    col3.metric("📦 Inventory Added Qty", f"{filtered_inventory['Quantity'].sum():.2f}")
+    col4.metric("🛒 Total Orders Qty", f"{filtered_orders['Quantity'].sum():.2f}")
 
     st.markdown("### 📦 Inventory")
     show_aggrid(filtered_inventory)
@@ -172,12 +188,10 @@ elif page == "Inventory":
         with col1:
             product = st.selectbox("Product", list(products.keys()))
         with col2:
-            default_unit = products.get(product, "kg")
-            unit = st.selectbox("Unit", units, index=units.index(default_unit))
+            unit = st.selectbox("Unit", units, index=units.index(products[product]))
         quantity = st.number_input("Quantity", min_value=0.0, format="%.2f")
         price = st.number_input("Price per Unit ₹", min_value=0.0, format="%.2f")
-        submit = st.form_submit_button("Add Inventory")
-        if submit:
+        if st.form_submit_button("Add Inventory"):
             total = quantity * price
             new_row = pd.DataFrame([[datetime.now().date(), product, quantity, unit, price, total]],
                                    columns=["Date", "Product", "Quantity", "Unit", "Price", "Total"])
@@ -199,12 +213,10 @@ elif page == "Sales":
         with col1:
             product = st.selectbox("Product", list(products.keys()))
         with col2:
-            default_unit = products.get(product, "kg")
-            unit = st.selectbox("Unit", units, index=units.index(default_unit))
+            unit = st.selectbox("Unit", units, index=units.index(products[product]))
         quantity = st.number_input("Quantity", min_value=0.0, format="%.2f")
         price = st.number_input("Price per Unit ₹", min_value=0.0, format="%.2f")
-        submit = st.form_submit_button("Add Sale")
-        if submit:
+        if st.form_submit_button("Add Sale"):
             total = quantity * price
             new_row = pd.DataFrame([[datetime.now().date(), product, quantity, unit, price, total]],
                                    columns=["Date", "Product", "Quantity", "Unit", "Price", "Total"])
@@ -226,14 +238,12 @@ elif page == "Orders":
         with col1:
             product = st.selectbox("Product", list(products.keys()))
         with col2:
-            default_unit = products.get(product, "kg")
-            unit = st.selectbox("Unit", units, index=units.index(default_unit))
+            unit = st.selectbox("Unit", units, index=units.index(products[product]))
         quantity = st.number_input("Quantity", min_value=0.0, format="%.2f")
         price = st.number_input("Price per Unit ₹", min_value=0.0, format="%.2f")
         party = st.text_input("Party Name")
         advance = st.number_input("Advance Received ₹", min_value=0.0, format="%.2f")
-        submit = st.form_submit_button("Add Order")
-        if submit:
+        if st.form_submit_button("Add Order"):
             total = quantity * price
             status = "Pending"
             new_row = pd.DataFrame([[datetime.now().date(), product, quantity, unit, price, total, party, advance, status]],
@@ -260,13 +270,10 @@ elif page == "Add Products":
     with st.form("add_product_form"):
         st.markdown("### ➕ Add New Product")
         col1, col2 = st.columns(2)
-        with col1:
-            new_product = st.text_input("Product Name")
-        with col2:
-            new_unit = st.selectbox("Default Unit", units)
-        submit = st.form_submit_button("Add Product")
-        if submit:
-            if new_product.strip() == "":
+        new_product = col1.text_input("Product Name")
+        new_unit = col2.selectbox("Default Unit", units)
+        if st.form_submit_button("Add Product"):
+            if not new_product.strip():
                 st.error("Product name cannot be empty.")
             elif new_product in products:
                 st.warning("Product already exists.")
