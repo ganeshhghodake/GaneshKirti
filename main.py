@@ -14,8 +14,8 @@ st.set_page_config(layout="wide")
 st.title("🧀 Inventory Management")
 
 # Google Drive Configuration
-SCOPES = ['https://www.googleapis.com/auth/drive']
-SERVICE_ACCOUNT_FILE = r"ganeshkirtimilkparlor-688df3e7a03f.json"
+# SCOPES = ['https://www.googleapis.com/auth/drive']
+# SERVICE_ACCOUNT_FILE = r"ganeshkirtimilkparlor-688df3e7a03f.json"
 
 # credentials = service_account.Credentials.from_service_account_file(
 #     SERVICE_ACCOUNT_FILE, scopes=SCOPES)
