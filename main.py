@@ -17,8 +17,11 @@ st.title("🧀 Inventory Management")
 SCOPES = ['https://www.googleapis.com/auth/drive']
 SERVICE_ACCOUNT_FILE = r"ganeshkirtimilkparlor-688df3e7a03f.json"
 
-credentials = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+# credentials = service_account.Credentials.from_service_account_file(
+#     SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+
+creds = service_account.Credentials.from_service_account_info(st.secrets["gcp"])
+
 drive_service = build('drive', 'v3', credentials=credentials)
 
 # Folder ID in your Google Drive where files will be stored
