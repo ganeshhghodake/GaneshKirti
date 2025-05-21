@@ -3,3 +3,6 @@ streamlit-aggrid==1.1.4.post1
 pandas==2.2.3
 openpyxl==3.1.5
 google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
